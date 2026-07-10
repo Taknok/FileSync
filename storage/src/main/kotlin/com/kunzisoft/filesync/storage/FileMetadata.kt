@@ -16,7 +16,8 @@ data class FileMetadata(
     val isDirectory: Boolean,
     val etag: String?,
     val localPath: String? = null,
-    val syncStatus: SyncStatus = SyncStatus.SYNCED
+    val syncStatus: SyncStatus = SyncStatus.SYNCED,
+    val lastSyncTime: Long = 0L
 )
 
 enum class SyncStatus {

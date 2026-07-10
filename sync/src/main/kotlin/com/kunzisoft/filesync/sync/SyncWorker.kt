@@ -54,11 +54,7 @@ class SyncWorker @AssistedInject constructor(
             // 2. Upsert remote files
             for (remoteFile in remoteFiles) {
                 val normalizedRemotePath = remoteFile.path.trim('/')
-                
-                // CRITICAL: WebDAV often returns the directory itself in the list. Skip it.
-                if (normalizedRemotePath == normalizedRequestedPath) {
-                    continue
-                }
+                if (normalizedRemotePath == normalizedRequestedPath) continue
 
                 val metadata = FileMetadata(
                     id = "$providerId:$normalizedRemotePath",
@@ -74,13 +70,12 @@ class SyncWorker @AssistedInject constructor(
                     syncStatus = SyncStatus.SYNCED
                 )
                 metadataDao.insert(metadata)
-                Log.d("FileSync", "SyncWorker: Inserted [${metadata.id}] with parent [${metadata.parentId}]")
             }
 
-            // Update throttle
-            val config = providerDao.getProviderById(providerId)
-            if (config != null) {
-                providerDao.insertProvider(config.copy(lastSyncTime = System.currentTimeMillis()))
+            // Update last sync time on the folder itself
+            val parentMetadata = metadataDao.getById(parentDocumentId)
+            if (parentMetadata != null) {
+                metadataDao.insert(parentMetadata.copy(lastSyncTime = System.currentTimeMillis()))
             }
 
             // Notify SAF

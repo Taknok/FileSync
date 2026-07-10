@@ -10,6 +10,5 @@ data class ProviderConfig(
     val name: String,
     val baseUrl: String? = null,
     val username: String? = null,
-    val isEnabled: Boolean = true,
-    val lastSyncTime: Long = 0L
+    val isEnabled: Boolean = true
 )

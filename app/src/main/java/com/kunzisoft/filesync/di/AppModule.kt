@@ -42,5 +42,14 @@ object AppModule {
 
     @Provides
     @Singleton
-    fun provideOkHttpClient(): OkHttpClient = OkHttpClient.Builder().build()
+    fun provideOkHttpClient(): OkHttpClient {
+        val logging = okhttp3.logging.HttpLoggingInterceptor { message ->
+            android.util.Log.d("FileSync_OkHttp", message)
+        }
+        logging.setLevel(okhttp3.logging.HttpLoggingInterceptor.Level.HEADERS)
+        
+        return OkHttpClient.Builder()
+            .addInterceptor(logging)
+            .build()
+    }
 }
