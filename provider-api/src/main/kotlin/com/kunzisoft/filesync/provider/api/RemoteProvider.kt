@@ -14,7 +14,7 @@ interface RemoteProvider {
         path: String,
         input: InputStream,
         overwrite: Boolean
-    )
+    ): RemoteFile?
 
     suspend fun delete(path: String)
 

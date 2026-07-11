@@ -1,6 +1,7 @@
 package com.kunzisoft.filesync.di
 
 import android.content.Context
+import android.app.NotificationManager
 import androidx.room.Room
 import com.kunzisoft.filesync.storage.AppDatabase
 import com.kunzisoft.filesync.storage.MetadataDao
@@ -39,6 +40,12 @@ object AppModule {
 
     @Provides
     fun provideProviderDao(db: AppDatabase): ProviderDao = db.providerDao()
+
+    @Provides
+    @Singleton
+    fun provideNotificationManager(@ApplicationContext context: Context): android.app.NotificationManager {
+        return context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+    }
 
     @Provides
     @Singleton

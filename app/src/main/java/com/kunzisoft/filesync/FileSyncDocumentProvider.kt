@@ -3,7 +3,11 @@ package com.kunzisoft.filesync
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.os.CancellationSignal
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.os.ProxyFileDescriptorCallback
+import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.provider.DocumentsProvider
 import android.util.Log
@@ -22,7 +26,10 @@ import dagger.hilt.android.EntryPointAccessors
 import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import java.io.File
 import java.io.FileNotFoundException
+import java.io.IOException
+import java.io.RandomAccessFile
 import kotlin.concurrent.thread
 
 class FileSyncDocumentProvider : DocumentsProvider() {
@@ -31,6 +38,7 @@ class FileSyncDocumentProvider : DocumentsProvider() {
     private lateinit var providerDao: ProviderDao
     private lateinit var workManager: WorkManager
     private lateinit var providerRegistry: ProviderRegistry
+    private lateinit var notificationHelper: NotificationHelper
 
     override fun onCreate(): Boolean {
         val appContext = context?.applicationContext ?: return false
@@ -42,6 +50,7 @@ class FileSyncDocumentProvider : DocumentsProvider() {
         providerDao = entryPoint.providerDao()
         workManager = entryPoint.workManager()
         providerRegistry = entryPoint.providerRegistry()
+        notificationHelper = entryPoint.notificationHelper()
         return true
     }
 
@@ -131,26 +140,110 @@ class FileSyncDocumentProvider : DocumentsProvider() {
         val path = documentId.substringAfter(":", "")
         val provider = runBlocking { providerRegistry.getProvider(providerId) } ?: throw FileNotFoundException()
 
-        val pipe = ParcelFileDescriptor.createPipe()
-        val readEnd = pipe[0]
-        val writeEnd = pipe[1]
-
         if (mode.contains("w")) {
-            thread {
-                try {
-                    val inputStream = ParcelFileDescriptor.AutoCloseInputStream(readEnd)
-                    runBlocking {
-                        provider.write(path, inputStream, overwrite = true)
+            // Conflict check before opening for write
+            val cachedMetadata = runBlocking { metadataDao.getById(documentId) }
+            val remoteMetadata = runBlocking { provider.stat(path) }
+
+            if (remoteMetadata != null && cachedMetadata != null && cachedMetadata.etag != null) {
+                if (remoteMetadata.etag != cachedMetadata.etag) {
+                    Log.w("FileSync", "SAF: Conflict detected for $documentId. Remote: ${remoteMetadata.etag}, Local: ${cachedMetadata.etag}")
+                    if (cachedMetadata.syncStatus != SyncStatus.CONFLICT) {
+                        runBlocking { metadataDao.updateSyncStatus(documentId, SyncStatus.CONFLICT) }
+                        notificationHelper.showConflictNotification(cachedMetadata.name)
                     }
-                    Log.d("FileSync", "SAF: Upload finished for $documentId")
-                } catch (e: Exception) {
-                    Log.e("FileSync", "SAF: Upload failed for $documentId", e)
-                } finally {
-                    try { readEnd.close() } catch (e: Exception) {}
+                    throw IOException("Conflict detected: Remote file has changed since last sync.")
                 }
             }
-            return writeEnd
+
+            val storageManager = context?.getSystemService(android.content.Context.STORAGE_SERVICE) as StorageManager
+            val tempFile = File(context?.cacheDir, "upload_${documentId.hashCode()}.tmp")
+            val pfdMode = ParcelFileDescriptor.parseMode(mode)
+            
+            // Pre-fill the temp file with current remote content if not truncating
+            // This allows apps to read/append/seek correctly
+            val shouldPreFill = (pfdMode and ParcelFileDescriptor.MODE_TRUNCATE) == 0
+            
+            if (shouldPreFill) {
+                runBlocking {
+                    try {
+                        provider.read(path).use { input ->
+                            tempFile.outputStream().use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                        Log.d("FileSync", "SAF: Pre-filled temp file for $documentId (${tempFile.length()} bytes)")
+                    } catch (e: Exception) {
+                        Log.d("FileSync", "SAF: Could not pre-fill temp file: ${e.message}")
+                        if (tempFile.exists()) tempFile.delete()
+                        tempFile.createNewFile()
+                    }
+                }
+            } else {
+                Log.d("FileSync", "SAF: Truncate mode detected, starting with empty temp file for $documentId")
+                if (tempFile.exists()) tempFile.delete()
+                tempFile.createNewFile()
+            }
+
+            return storageManager.openProxyFileDescriptor(
+                pfdMode,
+                object : ProxyFileDescriptorCallback() {
+                    private val raf = RandomAccessFile(tempFile, "rw")
+
+                    override fun onGetSize(): Long = raf.length()
+
+                    override fun onRead(offset: Long, size: Int, data: ByteArray?): Int {
+                        if (data == null) return 0
+                        raf.seek(offset)
+                        val read = raf.read(data, 0, size)
+                        return if (read < 0) 0 else read
+                    }
+
+                    override fun onWrite(offset: Long, size: Int, data: ByteArray?): Int {
+                        if (data == null) return 0
+                        raf.seek(offset)
+                        raf.write(data, 0, size)
+                        return size
+                    }
+
+                    override fun onFsync() {
+                        raf.getFD().sync()
+                    }
+
+                    override fun onRelease() {
+                        Log.d("FileSync", "SAF: Proxy released for $documentId, starting background upload")
+                        thread {
+                            try {
+                                raf.close()
+                                if (!tempFile.exists()) {
+                                    Log.e("FileSync", "SAF: Temp file missing for $documentId")
+                                    return@thread
+                                }
+                                Log.d("FileSync", "SAF: Temp file size for $documentId: ${tempFile.length()} bytes")
+                                
+                                tempFile.inputStream().use { input ->
+                                    val updatedRemote = runBlocking {
+                                        provider.write(path, input, overwrite = true)
+                                    }
+                                    Log.d("FileSync", "SAF: Upload finished for $documentId")
+                                    runBlocking {
+                                        metadataDao.updateEtagAndSynced(documentId, updatedRemote?.etag)
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.e("FileSync", "SAF: Upload failed in onRelease for $documentId", e)
+                            } finally {
+                                if (tempFile.exists()) tempFile.delete()
+                            }
+                        }
+                    }
+                },
+                Handler(Looper.getMainLooper())
+            )
         } else {
+            val pipe = ParcelFileDescriptor.createPipe()
+            val readEnd = pipe[0]
+            val writeEnd = pipe[1]
             thread {
                 try {
                     val remoteStream = runBlocking { provider.read(path) }
@@ -159,7 +252,7 @@ class FileSyncDocumentProvider : DocumentsProvider() {
                         input.copyTo(out)
                     }
                     out.flush()
-                    out.close() 
+                    out.close()
                     Log.d("FileSync", "SAF: Download finished for $documentId")
                 } catch (e: Exception) {
                     Log.e("FileSync", "SAF: Download failed for $documentId", e)
@@ -281,6 +374,7 @@ class FileSyncDocumentProvider : DocumentsProvider() {
         fun providerDao(): ProviderDao
         fun workManager(): WorkManager
         fun providerRegistry(): ProviderRegistry
+        fun notificationHelper(): NotificationHelper
     }
 
     companion object {

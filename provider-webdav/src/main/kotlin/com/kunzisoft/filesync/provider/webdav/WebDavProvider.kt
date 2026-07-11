@@ -78,22 +78,30 @@ class WebDavProvider(
         return response.body?.byteStream() ?: throw Exception("Empty body")
     }
 
-    override suspend fun write(path: String, input: InputStream, overwrite: Boolean) {
+    override suspend fun write(path: String, input: InputStream, overwrite: Boolean): RemoteFile? {
         val url = buildUrl(path)
         Log.d("FileSync", "WebDAV: Starting PUT request to $url")
         
-        // Handle empty file explicitly to avoid server-side ArgumentNullExceptions
-        val isInitiallyEmpty = try { input.available() == 0 } catch (e: Exception) { false }
+        // Use BufferedInputStream to peek if it's empty, as input.available() is unreliable for PFD streams
+        val bis = java.io.BufferedInputStream(input)
+        bis.mark(1)
+        val firstByte = bis.read()
+        val isEmpty = firstByte == -1
+        bis.reset()
 
-        val requestBody = if (isInitiallyEmpty) {
+        // We need the length for some WebDAV servers to avoid 500 errors
+        val contentLength = try { bis.available().toLong() } catch (e: Exception) { -1L }
+
+        val requestBody = if (isEmpty) {
             Log.d("FileSync", "WebDAV: File is empty, using 0-length request body")
             "".toRequestBody("application/octet-stream".toMediaType())
         } else {
             object : RequestBody() {
                 override fun contentType() = "application/octet-stream".toMediaType()
+                override fun contentLength() = contentLength
                 override fun writeTo(sink: BufferedSink) {
-                    Log.d("FileSync", "WebDAV: Beginning stream pump to server")
-                    input.source().use { source ->
+                    Log.d("FileSync", "WebDAV: Beginning stream pump to server (length: $contentLength)")
+                    bis.source().use { source ->
                         sink.writeAll(source)
                     }
                 }
@@ -119,6 +127,14 @@ class WebDavProvider(
             throw Exception("Failed to write file: ${response.code}")
         } else {
             Log.d("FileSync", "WebDAV: PUT successful for $url")
+            // Try to get ETag from header or stat if not present
+            val etag = response.header("ETag")
+            return if (etag != null) {
+                // We don't have all info (size, modifiedAt) from PUT response usually, so stat is safer
+                stat(path)
+            } else {
+                stat(path)
+            }
         }
     }
 

@@ -22,4 +22,13 @@ interface MetadataDao {
 
     @Query("SELECT * FROM file_metadata WHERE parentId = :parentId")
     suspend fun getChildren(parentId: String): List<FileMetadata>
+
+    @Query("SELECT * FROM file_metadata WHERE syncStatus = 'CONFLICT'")
+    fun observeConflicts(): Flow<List<FileMetadata>>
+
+    @Query("UPDATE file_metadata SET syncStatus = :status WHERE id = :id")
+    suspend fun updateSyncStatus(id: String, status: SyncStatus)
+
+    @Query("UPDATE file_metadata SET etag = :etag, syncStatus = 'SYNCED' WHERE id = :id")
+    suspend fun updateEtagAndSynced(id: String, etag: String?)
 }

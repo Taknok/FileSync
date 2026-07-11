@@ -4,15 +4,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.*
 import com.kunzisoft.filesync.core.ProviderRegistry
-import com.kunzisoft.filesync.storage.EncryptedStorage
-import com.kunzisoft.filesync.storage.ProviderConfig
-import com.kunzisoft.filesync.storage.ProviderDao
+import com.kunzisoft.filesync.storage.*
 import com.kunzisoft.filesync.sync.SyncWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.util.UUID
 import javax.inject.Inject
@@ -20,15 +16,20 @@ import javax.inject.Inject
 @HiltViewModel
 class ProviderViewModel @Inject constructor(
     private val providerDao: ProviderDao,
+    private val metadataDao: MetadataDao,
     private val encryptedStorage: EncryptedStorage,
     private val workManager: WorkManager,
-    private val providerRegistry: ProviderRegistry
+    private val providerRegistry: ProviderRegistry,
+    private val notificationHelper: com.kunzisoft.filesync.NotificationHelper
 ) : ViewModel() {
 
     private val _refreshEvents = MutableSharedFlow<RefreshResult>()
     val refreshEvents: SharedFlow<RefreshResult> = _refreshEvents
 
     val providers = providerDao.getAllProviders()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val conflicts: StateFlow<List<FileMetadata>> = metadataDao.observeConflicts()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     sealed class RefreshResult {
@@ -105,4 +106,19 @@ class ProviderViewModel @Inject constructor(
             providerRegistry.invalidateProvider(config.id)
         }
     }
+
+    fun resolveConflict(metadata: FileMetadata, action: ConflictAction) {
+        viewModelScope.launch(Dispatchers.IO) {
+            // Fetch latest remote etag to "align" and allow next write or refresh
+            val provider = providerRegistry.getProvider(metadata.providerId)
+            val remote = provider?.stat(metadata.path)
+            
+            metadataDao.updateEtagAndSynced(metadata.id, remote?.etag)
+            notificationHelper.cancelConflictNotification(metadata.name)
+        }
+    }
+}
+
+enum class ConflictAction {
+    FORCE_OVERWRITE, DISCARD_LOCAL
 }

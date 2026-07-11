@@ -3,17 +3,19 @@ package com.kunzisoft.filesync
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
-import dagger.hilt.android.AndroidEntryPoint
-
 import androidx.activity.viewModels
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import com.kunzisoft.filesync.ui.ConflictScreen
 import com.kunzisoft.filesync.ui.ProviderViewModel
 import com.kunzisoft.filesync.ui.SetupScreen
+import dagger.hilt.android.AndroidEntryPoint
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -21,13 +23,59 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        val initialTab = intent.getIntExtra(NotificationHelper.EXTRA_TAB, 0)
+
         setContent {
             MaterialTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    SetupScreen(viewModel)
+                var selectedTab by remember { mutableIntStateOf(initialTab) }
+                val conflicts by viewModel.conflicts.collectAsState()
+
+                // Update tab if intent changes (e.g. notification clicked while app is running)
+                LaunchedEffect(intent) {
+                    val tab = intent.getIntExtra(NotificationHelper.EXTRA_TAB, -1)
+                    if (tab != -1) {
+                        selectedTab = tab
+                    }
+                }
+
+                Scaffold(
+                    bottomBar = {
+                        NavigationBar {
+                            NavigationBarItem(
+                                icon = { Icon(Icons.Default.Settings, contentDescription = "Setup") },
+                                label = { Text("Setup") },
+                                selected = selectedTab == 0,
+                                onClick = { selectedTab = 0 }
+                            )
+                            NavigationBarItem(
+                                icon = {
+                                    BadgedBox(badge = {
+                                        if (conflicts.isNotEmpty()) {
+                                            Badge { Text(conflicts.size.toString()) }
+                                        }
+                                    }) {
+                                        Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Conflicts")
+                                    }
+                                },
+                                label = { Text("Conflicts") },
+                                selected = selectedTab == 1,
+                                onClick = { selectedTab = 1 }
+                            )
+                        }
+                    }
+                ) { padding ->
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(padding),
+                        color = MaterialTheme.colorScheme.background
+                    ) {
+                        when (selectedTab) {
+                            0 -> SetupScreen(viewModel)
+                            1 -> ConflictScreen(viewModel)
+                        }
+                    }
                 }
             }
         }
