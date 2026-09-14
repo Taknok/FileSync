@@ -10,6 +10,8 @@ interface RemoteProvider {
 
     suspend fun read(path: String): InputStream
 
+    suspend fun read(path: String, rangeStart: Long, rangeEnd: Long? = null): InputStream
+
     suspend fun write(
         path: String,
         input: InputStream,

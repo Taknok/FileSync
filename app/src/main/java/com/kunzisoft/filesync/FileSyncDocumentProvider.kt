@@ -6,8 +6,6 @@ import android.os.CancellationSignal
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
-import android.os.ProxyFileDescriptorCallback
-import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.provider.DocumentsProvider
 import android.util.Log
@@ -24,62 +22,66 @@ import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
 import dagger.hilt.components.SingletonComponent
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
-import java.io.RandomAccessFile
 import kotlin.concurrent.thread
 
 class FileSyncDocumentProvider : DocumentsProvider() {
 
-    private lateinit var metadataDao: MetadataDao
-    private lateinit var providerDao: ProviderDao
-    private lateinit var workManager: WorkManager
-    private lateinit var providerRegistry: ProviderRegistry
-    private lateinit var notificationHelper: NotificationHelper
-
-    override fun onCreate(): Boolean {
-        val appContext = context?.applicationContext ?: return false
-        val entryPoint = EntryPointAccessors.fromApplication(
-            appContext,
+    private val entryPoint by lazy {
+        EntryPointAccessors.fromApplication(
+            context?.applicationContext ?: throw IllegalStateException("Context not available"),
             ProviderEntryPoint::class.java
         )
-        metadataDao = entryPoint.metadataDao()
-        providerDao = entryPoint.providerDao()
-        workManager = entryPoint.workManager()
-        providerRegistry = entryPoint.providerRegistry()
-        notificationHelper = entryPoint.notificationHelper()
+    }
+
+    private val metadataDao by lazy { entryPoint.metadataDao() }
+    private val providerDao by lazy { entryPoint.providerDao() }
+    private val workManager by lazy { entryPoint.workManager() }
+    private val providerRegistry by lazy { entryPoint.providerRegistry() }
+    private val notificationHelper by lazy { entryPoint.notificationHelper() }
+
+    override fun onCreate(): Boolean {
         return true
     }
 
     override fun queryRoots(projection: Array<out String>?): Cursor {
         val cursor = MatrixCursor(projection ?: DEFAULT_ROOT_PROJECTION)
-        
         val providers = runBlocking { providerDao.getAllProviders().first() }
-        
-        for (provider in providers) {
-            val row = cursor.newRow()
-            row.add(DocumentsContract.Root.COLUMN_ROOT_ID, provider.id)
-            row.add(DocumentsContract.Root.COLUMN_FLAGS, DocumentsContract.Root.FLAG_SUPPORTS_CREATE or DocumentsContract.Root.FLAG_SUPPORTS_IS_CHILD)
-            row.add(DocumentsContract.Root.COLUMN_TITLE, provider.name)
-            row.add(DocumentsContract.Root.COLUMN_DOCUMENT_ID, "${provider.id}:/")
+        for (config in providers) {
+            cursor.newRow().apply {
+                add(DocumentsContract.Root.COLUMN_ROOT_ID, config.id)
+                add(DocumentsContract.Root.COLUMN_SUMMARY, config.baseUrl)
+                add(DocumentsContract.Root.COLUMN_TITLE, config.name)
+                add(DocumentsContract.Root.COLUMN_FLAGS, DocumentsContract.Root.FLAG_SUPPORTS_CREATE or DocumentsContract.Root.FLAG_SUPPORTS_IS_CHILD)
+                add(DocumentsContract.Root.COLUMN_DOCUMENT_ID, "${config.id}:/")
+            }
         }
         return cursor
     }
 
     override fun queryDocument(documentId: String?, projection: Array<out String>?): Cursor {
         val cursor = MatrixCursor(projection ?: DEFAULT_DOCUMENT_PROJECTION)
-        val path = documentId?.substringAfter(":", "") ?: return cursor
-        
-        val metadata = runBlocking { metadataDao.getById(documentId!!) }
-        metadata?.let { addDocumentRow(cursor, it) } ?: run {
-            val row = cursor.newRow()
-            row.add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, documentId)
-            row.add(DocumentsContract.Document.COLUMN_MIME_TYPE, DocumentsContract.Document.MIME_TYPE_DIR)
-            row.add(DocumentsContract.Document.COLUMN_DISPLAY_NAME, path.ifBlank { "/" })
-            row.add(DocumentsContract.Document.COLUMN_FLAGS, DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE)
+        if (documentId == null) return cursor
+
+        val providerId = documentId.substringBefore(":")
+        val path = documentId.substringAfter(":", "/")
+
+        val metadata = runBlocking { metadataDao.getById(documentId) }
+        if (metadata != null) {
+            addDocumentRow(cursor, metadata)
+        } else {
+            // Handle root or missing
+            cursor.newRow().apply {
+                add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, documentId)
+                add(DocumentsContract.Document.COLUMN_DISPLAY_NAME, if (path == "/") providerId else path.substringAfterLast('/'))
+                add(DocumentsContract.Document.COLUMN_MIME_TYPE, DocumentsContract.Document.MIME_TYPE_DIR)
+                add(DocumentsContract.Document.COLUMN_FLAGS, DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE)
+            }
         }
         return cursor
     }
@@ -116,8 +118,6 @@ class FileSyncDocumentProvider : DocumentsProvider() {
                 ))
                 .build()
             workManager.enqueueUniqueWork("sync_${parentDocumentId.hashCode()}", ExistingWorkPolicy.KEEP, syncRequest)
-        } else {
-            Log.d("FileSync", "SAF: Using cached data for $parentDocumentId")
         }
 
         for (child in children) {
@@ -140,14 +140,17 @@ class FileSyncDocumentProvider : DocumentsProvider() {
         val path = documentId.substringAfter(":", "")
         val provider = runBlocking { providerRegistry.getProvider(providerId) } ?: throw FileNotFoundException()
 
-        if (mode.contains("w")) {
-            // Conflict check before opening for write
+        val cacheFile = File(context?.cacheDir, "cache_${documentId.hashCode()}")
+        val isWrite = mode.contains("w")
+
+        // 1. Conflict Check (for write mode)
+        if (isWrite) {
             val cachedMetadata = runBlocking { metadataDao.getById(documentId) }
             val remoteMetadata = runBlocking { provider.stat(path) }
 
             if (remoteMetadata != null && cachedMetadata != null && cachedMetadata.etag != null) {
                 if (remoteMetadata.etag != cachedMetadata.etag) {
-                    Log.w("FileSync", "SAF: Conflict detected for $documentId. Remote: ${remoteMetadata.etag}, Local: ${cachedMetadata.etag}")
+                    Log.w("FileSync", "SAF: Conflict detected for $documentId.")
                     if (cachedMetadata.syncStatus != SyncStatus.CONFLICT) {
                         runBlocking { metadataDao.updateSyncStatus(documentId, SyncStatus.CONFLICT) }
                         notificationHelper.showConflictNotification(cachedMetadata.name)
@@ -155,113 +158,59 @@ class FileSyncDocumentProvider : DocumentsProvider() {
                     throw IOException("Conflict detected: Remote file has changed since last sync.")
                 }
             }
+        }
 
-            val storageManager = context?.getSystemService(android.content.Context.STORAGE_SERVICE) as StorageManager
-            val tempFile = File(context?.cacheDir, "upload_${documentId.hashCode()}.tmp")
-            val pfdMode = ParcelFileDescriptor.parseMode(mode)
-            
-            // Pre-fill the temp file with current remote content if not truncating
-            // This allows apps to read/append/seek correctly
-            val shouldPreFill = (pfdMode and ParcelFileDescriptor.MODE_TRUNCATE) == 0
-            
-            if (shouldPreFill) {
-                runBlocking {
-                    try {
-                        provider.read(path).use { input ->
-                            tempFile.outputStream().use { output ->
-                                input.copyTo(output)
-                            }
-                        }
-                        Log.d("FileSync", "SAF: Pre-filled temp file for $documentId (${tempFile.length()} bytes)")
-                    } catch (e: Exception) {
-                        Log.d("FileSync", "SAF: Could not pre-fill temp file: ${e.message}")
-                        if (tempFile.exists()) tempFile.delete()
-                        tempFile.createNewFile()
-                    }
-                }
-            } else {
-                Log.d("FileSync", "SAF: Truncate mode detected, starting with empty temp file for $documentId")
-                if (tempFile.exists()) tempFile.delete()
-                tempFile.createNewFile()
-            }
-
-            return storageManager.openProxyFileDescriptor(
-                pfdMode,
-                object : ProxyFileDescriptorCallback() {
-                    private val raf = RandomAccessFile(tempFile, "rw")
-
-                    override fun onGetSize(): Long = raf.length()
-
-                    override fun onRead(offset: Long, size: Int, data: ByteArray?): Int {
-                        if (data == null) return 0
-                        raf.seek(offset)
-                        val read = raf.read(data, 0, size)
-                        return if (read < 0) 0 else read
-                    }
-
-                    override fun onWrite(offset: Long, size: Int, data: ByteArray?): Int {
-                        if (data == null) return 0
-                        raf.seek(offset)
-                        raf.write(data, 0, size)
-                        return size
-                    }
-
-                    override fun onFsync() {
-                        raf.getFD().sync()
-                    }
-
-                    override fun onRelease() {
-                        Log.d("FileSync", "SAF: Proxy released for $documentId, starting background upload")
-                        thread {
-                            try {
-                                raf.close()
-                                if (!tempFile.exists()) {
-                                    Log.e("FileSync", "SAF: Temp file missing for $documentId")
-                                    return@thread
-                                }
-                                Log.d("FileSync", "SAF: Temp file size for $documentId: ${tempFile.length()} bytes")
-                                
-                                tempFile.inputStream().use { input ->
-                                    val updatedRemote = runBlocking {
-                                        provider.write(path, input, overwrite = true)
-                                    }
-                                    Log.d("FileSync", "SAF: Upload finished for $documentId")
-                                    runBlocking {
-                                        metadataDao.updateEtagAndSynced(documentId, updatedRemote?.etag)
-                                    }
-                                }
-                            } catch (e: Exception) {
-                                Log.e("FileSync", "SAF: Upload failed in onRelease for $documentId", e)
-                            } finally {
-                                if (tempFile.exists()) tempFile.delete()
-                            }
-                        }
-                    }
-                },
-                Handler(Looper.getMainLooper())
-            )
+        // 2. Download to cache (if reading or if cache is missing/stale)
+        // For simplicity, we always download if not writing, or if opening for write but not truncating
+        val isTruncate = mode.contains("t")
+        if (!isTruncate) {
+             runBlocking(Dispatchers.IO) {
+                 try {
+                     provider.read(path).use { input ->
+                         cacheFile.outputStream().use { output ->
+                             input.copyTo(output)
+                         }
+                     }
+                     Log.d("FileSync", "SAF: Cached file for $documentId (${cacheFile.length()} bytes)")
+                 } catch (e: Exception) {
+                     if (!isWrite) throw FileNotFoundException("Could not download file: ${e.message}")
+                     // For write, it's okay if it fails (new file)
+                     if (!cacheFile.exists()) cacheFile.createNewFile()
+                 }
+             }
         } else {
-            val pipe = ParcelFileDescriptor.createPipe()
-            val readEnd = pipe[0]
-            val writeEnd = pipe[1]
-            thread {
-                try {
-                    val remoteStream = runBlocking { provider.read(path) }
-                    val out = ParcelFileDescriptor.AutoCloseOutputStream(writeEnd)
-                    remoteStream.use { input ->
-                        input.copyTo(out)
+            if (cacheFile.exists()) cacheFile.delete()
+            cacheFile.createNewFile()
+        }
+
+        // 3. Return standard PFD with OnCloseListener to trigger upload
+        return ParcelFileDescriptor.open(
+            cacheFile,
+            ParcelFileDescriptor.parseMode(mode),
+            Handler(Looper.getMainLooper())
+        ) {
+            if (isWrite) {
+                Log.d("FileSync", "SAF: File closed for $documentId, starting upload")
+                thread {
+                    try {
+                        cacheFile.inputStream().use { input ->
+                            val updatedRemote = runBlocking(Dispatchers.IO) {
+                                provider.write(path, input, overwrite = true)
+                            }
+                            Log.d("FileSync", "SAF: Upload finished for $documentId")
+                            runBlocking {
+                                metadataDao.updateEtagAndSynced(documentId, updatedRemote?.etag)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("FileSync", "SAF: Upload failed after close for $documentId", e)
+                    } finally {
+                        // Keep cache for next open? Or delete? 
+                        // Better to delete to ensure fresh download next time
+                        cacheFile.delete()
                     }
-                    out.flush()
-                    out.close()
-                    Log.d("FileSync", "SAF: Download finished for $documentId")
-                } catch (e: Exception) {
-                    Log.e("FileSync", "SAF: Download failed for $documentId", e)
-                    try { writeEnd.closeWithError(e.message ?: "stream error") } catch (ex: Exception) {}
-                } finally {
-                    try { writeEnd.close() } catch (e: Exception) {}
                 }
             }
-            return readEnd
         }
     }
 
@@ -270,101 +219,95 @@ class FileSyncDocumentProvider : DocumentsProvider() {
         mimeType: String?,
         displayName: String?
     ): String {
-        Log.d("FileSync", "SAF: createDocument in $parentDocumentId name $displayName")
-        if (parentDocumentId == null || displayName == null) throw FileNotFoundException()
+        if (parentDocumentId == null || mimeType == null || displayName == null) throw FileNotFoundException()
 
         val providerId = parentDocumentId.substringBefore(":")
         val parentPath = parentDocumentId.substringAfter(":", "").trim('/')
-        
         val newPath = if (parentPath.isEmpty()) displayName else "$parentPath/$displayName"
         val documentId = "$providerId:$newPath"
 
+        val provider = runBlocking { providerRegistry.getProvider(providerId) } ?: throw FileNotFoundException()
+
+        if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
+            runBlocking { provider.mkdir(newPath) }
+        } else {
+            // Create empty file
+            runBlocking { provider.write(newPath, "".byteInputStream(), overwrite = true) }
+        }
+
+        // Add to local DB so it's visible immediately
         val metadata = FileMetadata(
             id = documentId,
             parentId = parentDocumentId,
             providerId = providerId,
             path = newPath,
             name = displayName,
-            mimeType = mimeType ?: "application/octet-stream",
+            mimeType = mimeType,
             size = 0,
             modifiedAt = System.currentTimeMillis(),
-            isDirectory = DocumentsContract.Document.MIME_TYPE_DIR == mimeType,
-            etag = null,
-            syncStatus = SyncStatus.SYNCED
+            isDirectory = mimeType == DocumentsContract.Document.MIME_TYPE_DIR,
+            etag = null
         )
-
-        runBlocking {
-            if (metadata.isDirectory) {
-                val provider = providerRegistry.getProvider(providerId)
-                provider?.mkdir(newPath)
-            }
-            metadataDao.insert(metadata)
-        }
-
-        val notifyUri = DocumentsContract.buildChildDocumentsUri(AUTHORITY, parentDocumentId)
-        context?.contentResolver?.notifyChange(notifyUri, null)
+        runBlocking { metadataDao.insert(metadata) }
 
         return documentId
     }
 
     override fun deleteDocument(documentId: String?) {
-        Log.d("FileSync", "SAF: deleteDocument $documentId")
         if (documentId == null) return
         val providerId = documentId.substringBefore(":")
-        val path = documentId.substringAfter(":", "").trim('/')
-        
-        runBlocking {
-            val provider = providerRegistry.getProvider(providerId)
-            provider?.delete(path)
-            metadataDao.getById(documentId)?.let { metadataDao.delete(it) }
+        val path = documentId.substringAfter(":", "")
+        val provider = runBlocking { providerRegistry.getProvider(providerId) } ?: throw FileNotFoundException()
+
+        runBlocking { 
+            provider.delete(path)
+            val metadata = metadataDao.getById(documentId)
+            if (metadata != null) metadataDao.delete(metadata)
         }
-        
-        val parentId = documentId.substringBeforeLast("/", "$providerId:/")
-        val notifyUri = DocumentsContract.buildChildDocumentsUri(AUTHORITY, parentId)
-        context?.contentResolver?.notifyChange(notifyUri, null)
     }
 
     override fun renameDocument(documentId: String?, displayName: String?): String {
-        Log.d("FileSync", "SAF: renameDocument $documentId to $displayName")
         if (documentId == null || displayName == null) throw FileNotFoundException()
-        
         val providerId = documentId.substringBefore(":")
-        val oldPath = documentId.substringAfter(":", "").trim('/')
-        val parentPath = oldPath.substringBeforeLast("/", "")
+        val path = documentId.substringAfter(":", "")
+        val parentPath = path.substringBeforeLast('/', "")
         val newPath = if (parentPath.isEmpty()) displayName else "$parentPath/$displayName"
-        val newDocumentId = "$providerId:$newPath"
         
-        runBlocking {
-            val provider = providerRegistry.getProvider(providerId)
-            provider?.move(oldPath, newPath)
-            
-            metadataDao.getById(documentId)?.let { oldMetadata ->
+        val provider = runBlocking { providerRegistry.getProvider(providerId) } ?: throw FileNotFoundException()
+        runBlocking { 
+            provider.move(path, newPath)
+            // Update DB
+            val oldMetadata = metadataDao.getById(documentId)
+            if (oldMetadata != null) {
                 metadataDao.delete(oldMetadata)
                 metadataDao.insert(oldMetadata.copy(
-                    id = newDocumentId,
+                    id = "$providerId:$newPath",
                     path = newPath,
                     name = displayName
                 ))
             }
         }
-        
-        return newDocumentId
+        return "$providerId:$newPath"
     }
 
     override fun isChildDocument(parentDocumentId: String?, documentId: String?): Boolean {
         if (parentDocumentId == null || documentId == null) return false
-        return documentId.startsWith(parentDocumentId) || 
-               documentId.substringBefore(":") == parentDocumentId.substringBefore(":")
+        return documentId.startsWith(parentDocumentId)
     }
 
     private fun addDocumentRow(cursor: MatrixCursor, metadata: FileMetadata) {
-        val row = cursor.newRow()
-        row.add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, metadata.id)
-        row.add(DocumentsContract.Document.COLUMN_MIME_TYPE, metadata.mimeType)
-        row.add(DocumentsContract.Document.COLUMN_DISPLAY_NAME, metadata.name)
-        row.add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, metadata.modifiedAt)
-        row.add(DocumentsContract.Document.COLUMN_SIZE, metadata.size)
-        row.add(DocumentsContract.Document.COLUMN_FLAGS, 0)
+        cursor.newRow().apply {
+            add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, metadata.id)
+            add(DocumentsContract.Document.COLUMN_DISPLAY_NAME, metadata.name)
+            add(DocumentsContract.Document.COLUMN_MIME_TYPE, metadata.mimeType)
+            add(DocumentsContract.Document.COLUMN_SIZE, metadata.size)
+            add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, metadata.modifiedAt)
+            add(DocumentsContract.Document.COLUMN_FLAGS, 
+                DocumentsContract.Document.FLAG_SUPPORTS_DELETE or 
+                DocumentsContract.Document.FLAG_SUPPORTS_RENAME or
+                (if (metadata.isDirectory) DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE else DocumentsContract.Document.FLAG_SUPPORTS_WRITE)
+            )
+        }
     }
 
     @EntryPoint
@@ -380,20 +323,21 @@ class FileSyncDocumentProvider : DocumentsProvider() {
     companion object {
         const val AUTHORITY = "com.kunzisoft.filesync.documents"
 
-        private val DEFAULT_ROOT_PROJECTION = arrayOf(
+        val DEFAULT_ROOT_PROJECTION = arrayOf(
             DocumentsContract.Root.COLUMN_ROOT_ID,
-            DocumentsContract.Root.COLUMN_FLAGS,
+            DocumentsContract.Root.COLUMN_SUMMARY,
             DocumentsContract.Root.COLUMN_TITLE,
+            DocumentsContract.Root.COLUMN_FLAGS,
             DocumentsContract.Root.COLUMN_DOCUMENT_ID
         )
 
-        private val DEFAULT_DOCUMENT_PROJECTION = arrayOf(
+        val DEFAULT_DOCUMENT_PROJECTION = arrayOf(
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-            DocumentsContract.Document.COLUMN_MIME_TYPE,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+            DocumentsContract.Document.COLUMN_SIZE,
             DocumentsContract.Document.COLUMN_LAST_MODIFIED,
-            DocumentsContract.Document.COLUMN_FLAGS,
-            DocumentsContract.Document.COLUMN_SIZE
+            DocumentsContract.Document.COLUMN_FLAGS
         )
     }
 }

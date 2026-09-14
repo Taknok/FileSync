@@ -65,16 +65,28 @@ class WebDavProvider(
     }
 
     override suspend fun read(path: String): InputStream {
+        return read(path, 0, null)
+    }
+
+    override suspend fun read(path: String, rangeStart: Long, rangeEnd: Long?): InputStream {
         val url = buildUrl(path)
-        Log.d("FileSync", "WebDAV: GET $url")
+        Log.d("FileSync", "WebDAV: GET $url (Range: $rangeStart-${rangeEnd ?: ""})")
+        
         val request = Request.Builder()
             .url(url)
             .get()
         
+        if (rangeStart > 0 || rangeEnd != null) {
+            val rangeHeader = "bytes=$rangeStart-${rangeEnd ?: ""}"
+            request.header("Range", rangeHeader)
+        }
+        
         addAuth(request)
         
         val response = client.newCall(request.build()).execute()
-        if (!response.isSuccessful) throw Exception("Failed to read file: ${response.code}")
+        if (!response.isSuccessful && response.code != 206) {
+            throw Exception("Failed to read file: ${response.code}")
+        }
         return response.body?.byteStream() ?: throw Exception("Empty body")
     }
 

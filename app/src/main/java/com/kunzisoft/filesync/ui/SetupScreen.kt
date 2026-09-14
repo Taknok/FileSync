@@ -15,19 +15,42 @@ import com.kunzisoft.filesync.storage.ProviderConfig
 
 import androidx.compose.ui.platform.LocalContext
 import android.widget.Toast
+import androidx.compose.ui.tooling.preview.Preview
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SetupScreen(viewModel: ProviderViewModel) {
     val providers by viewModel.providers.collectAsState()
+    SetupScreen(
+        providers = providers,
+        refreshEvents = viewModel.refreshEvents,
+        onDelete = viewModel::deleteProvider,
+        onRefresh = viewModel::forceRefresh,
+        onAdd = viewModel::addProvider,
+        onUpdate = viewModel::updateProvider
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SetupScreen(
+    providers: List<ProviderConfig>,
+    refreshEvents: Flow<ProviderViewModel.RefreshResult>,
+    onDelete: (ProviderConfig) -> Unit,
+    onRefresh: (ProviderConfig) -> Unit,
+    onAdd: (String, String, String, String) -> Unit,
+    onUpdate: (ProviderConfig, String?) -> Unit
+) {
     var showAddDialog by remember { mutableStateOf(false) }
     var editingProvider by remember { mutableStateOf<ProviderConfig?>(null) }
     var errorDialogMessage by remember { mutableStateOf<String?>(null) }
 
     val context = LocalContext.current
 
-    LaunchedEffect(viewModel.refreshEvents) {
-        viewModel.refreshEvents.collect { result ->
+    LaunchedEffect(refreshEvents) {
+        refreshEvents.collect { result ->
             when (result) {
                 is ProviderViewModel.RefreshResult.Success -> {
                     Toast.makeText(context, "Refresh successful: ${result.providerName}", Toast.LENGTH_SHORT).show()
@@ -55,9 +78,9 @@ fun SetupScreen(viewModel: ProviderViewModel) {
             items(providers) { provider ->
                 ProviderItem(
                     config = provider,
-                    onDelete = { viewModel.deleteProvider(it) },
+                    onDelete = { onDelete(it) },
                     onEdit = { editingProvider = it },
-                    onRefresh = { viewModel.forceRefresh(it) }
+                    onRefresh = { onRefresh(it) }
                 )
             }
         }
@@ -67,7 +90,7 @@ fun SetupScreen(viewModel: ProviderViewModel) {
                 title = "Add WebDAV Provider",
                 onDismiss = { showAddDialog = false },
                 onConfirm = { name, url, user, password ->
-                    viewModel.addProvider(name, url, user, password)
+                    onAdd(name, url, user, password)
                     showAddDialog = false
                 }
             )
@@ -82,7 +105,7 @@ fun SetupScreen(viewModel: ProviderViewModel) {
                 onDismiss = { editingProvider = null },
                 onConfirm = { name, url, user, password ->
                     val updated = provider.copy(name = name, baseUrl = url, username = user)
-                    viewModel.updateProvider(updated, password.ifBlank { null })
+                    onUpdate(updated, password.ifBlank { null })
                     editingProvider = null
                 }
             )
@@ -170,4 +193,23 @@ fun ProviderDialog(
             }
         }
     )
+}
+
+@Preview(showBackground = true)
+@Composable
+fun SetupScreenPreview() {
+    val sampleProviders = listOf(
+        ProviderConfig(id = "1", type = "webdav", name = "My Nextcloud", baseUrl = "https://example.com/dav", username = "paul"),
+        ProviderConfig(id = "2", type = "webdav", name = "Work Storage", baseUrl = "https://work.com/dav", username = "p.smith")
+    )
+    MaterialTheme {
+        SetupScreen(
+            providers = sampleProviders,
+            refreshEvents = emptyFlow(),
+            onDelete = {},
+            onRefresh = {},
+            onAdd = { _, _, _, _ -> },
+            onUpdate = { _, _ -> }
+        )
+    }
 }
