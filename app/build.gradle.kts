@@ -1,6 +1,5 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.hilt)
     alias(libs.plugins.ksp)
     alias(libs.plugins.compose.compiler)
@@ -9,12 +8,12 @@ plugins {
 
 android {
     namespace = "com.kunzisoft.filesync"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.kunzisoft.filesync"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 37
         versionCode = 1
         versionName = "1.0"
 
@@ -24,7 +23,6 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
 
@@ -38,13 +36,6 @@ android {
         }
     }
 
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
-    }
-    kotlinOptions {
-        jvmTarget = "11"
-    }
     buildFeatures {
         compose = true
     }
@@ -83,8 +74,9 @@ dependencies {
     
     // Hilt
     implementation(libs.hilt.android)
+    implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
-    ksp("androidx.hilt:hilt-compiler:1.2.0")
+
 
     // Lifecycle
     implementation(libs.androidx.lifecycle.runtime.ktx)

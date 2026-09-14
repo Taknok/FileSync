@@ -3,19 +3,15 @@ package com.kunzisoft.filesync.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import com.kunzisoft.filesync.R
 import com.kunzisoft.filesync.storage.ProviderConfig
 
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Settings
 
 import androidx.compose.ui.platform.LocalContext
 import android.widget.Toast
@@ -47,7 +43,7 @@ fun SetupScreen(viewModel: ProviderViewModel) {
         topBar = { TopAppBar(title = { Text("FileSync Setup") }) },
         floatingActionButton = {
             FloatingActionButton(onClick = { showAddDialog = true }) {
-                Icon(Icons.Default.Add, contentDescription = "Add Provider")
+                Icon(painterResource(R.drawable.ic_add_24px), contentDescription = "Add Provider")
             }
         }
     ) { padding ->
@@ -120,13 +116,13 @@ fun ProviderItem(
         trailingContent = {
             Row {
                 IconButton(onClick = { onRefresh(config) }) {
-                    Icon(Icons.Default.Refresh, contentDescription = "Force Refresh")
+                    Icon(painterResource(R.drawable.ic_refresh_24px), contentDescription = "Force Refresh")
                 }
                 IconButton(onClick = { onEdit(config) }) {
-                    Icon(Icons.Default.Edit, contentDescription = "Edit")
+                    Icon(painterResource(R.drawable.ic_edit_24px), contentDescription = "Edit")
                 }
                 IconButton(onClick = { onDelete(config) }) {
-                    Icon(Icons.Default.Delete, contentDescription = "Delete")
+                    Icon(painterResource(R.drawable.ic_delete_24px), contentDescription = "Delete")
                 }
             }
         }

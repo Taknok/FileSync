@@ -6,12 +6,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import com.kunzisoft.filesync.ui.ConflictScreen
 import com.kunzisoft.filesync.ui.ProviderViewModel
 import com.kunzisoft.filesync.ui.SetupScreen
@@ -43,7 +41,7 @@ class MainActivity : ComponentActivity() {
                     bottomBar = {
                         NavigationBar {
                             NavigationBarItem(
-                                icon = { Icon(Icons.Default.Settings, contentDescription = "Setup") },
+                                icon = { Icon(painterResource(R.drawable.ic_settings_24px), contentDescription = "Setup") },
                                 label = { Text("Setup") },
                                 selected = selectedTab == 0,
                                 onClick = { selectedTab = 0 }
@@ -55,7 +53,7 @@ class MainActivity : ComponentActivity() {
                                             Badge { Text(conflicts.size.toString()) }
                                         }
                                     }) {
-                                        Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Conflicts")
+                                        Icon(painterResource(R.drawable.ic_list_24px), contentDescription = "Conflicts")
                                     }
                                 },
                                 label = { Text("Conflicts") },

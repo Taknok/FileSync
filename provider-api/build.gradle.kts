@@ -1,18 +1,16 @@
 plugins {
     alias(libs.plugins.android.library)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.serialization)
     id("kotlin-parcelize")
 }
 
 android {
     namespace = "com.kunzisoft.filesync.provider.api"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         minSdk = 21
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        consumerProguardFiles("consumer-rules.pro")
     }
 
     buildFeatures {
@@ -22,15 +20,13 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
-    }
-    kotlinOptions {
-        jvmTarget = "11"
+
+    kotlin {
+        compilerOptions {
+            languageVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_0)
+        }
     }
 }
 

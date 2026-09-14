@@ -3,8 +3,6 @@ package com.kunzisoft.filesync.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -12,7 +10,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import com.kunzisoft.filesync.R
 import com.kunzisoft.filesync.storage.FileMetadata
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -55,7 +55,11 @@ fun ConflictItem(
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Warning, contentDescription = "Conflict", tint = Color.Red)
+                Icon(
+                    painter = painterResource(R.drawable.ic_warning_24px),
+                    contentDescription = "Conflict",
+                    tint = MaterialTheme.colorScheme.error
+                )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(text = metadata.name, style = MaterialTheme.typography.titleMedium)
             }
